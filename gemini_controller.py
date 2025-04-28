@@ -14,15 +14,25 @@ if typing.TYPE_CHECKING:
 
 class GeminiController(QObject):
     # Signals
-    explanation_ready = Signal(str, str)
-    chat_response_ready = Signal(str, str)
-    file_content_generated = Signal(str, str)
-    editor_content_generated = Signal(str) # Signal to update the *current* editor
+    # explanation_ready = Signal(str, str) # Replaced by streaming
+    # chat_response_ready = Signal(str, str) # Replaced by streaming
+    # file_content_generated = Signal(str, str) # Replaced by streaming
+    # editor_content_generated = Signal(str) # Replaced by streaming
     status_update = Signal(str, str)
     available_models_updated = Signal(list)
     initialization_status = Signal(str, bool)
     edit_file_requested_from_chat = Signal(str)
     edit_context_set_from_chat = Signal(str)
+
+    # --- NEW Streaming Signals ---
+    # Emitted when a streaming operation (chat, edit, create) begins
+    stream_started = Signal(str, str) # sender, context_type ('chat', 'editor', 'file_create')
+    # Emitted for each chunk of text received from the API
+    stream_chunk_received = Signal(str) # chunk_text
+    # Emitted when the stream finishes successfully
+    stream_finished = Signal(str, str) # sender, context_type
+    # Emitted if an error occurs during streaming or setup
+    stream_error = Signal(str, str) # error_message, context_type
 
     # <<< MODIFIED __init__ >>>
     def __init__(self, file_pane_ref: 'FilePane', editor_pane_ref: 'EditorPane'): # Accept EditorPane
@@ -36,7 +46,7 @@ class GeminiController(QObject):
         self._is_configured = False
         self._configure_gemini()
 
-    # ... (_configure_gemini, update_available_models, set_selected_model, _read_files, _call_gemini_api remain the same) ...
+    # ... (_configure_gemini, update_available_models, set_selected_model, _read_files remain the same) ...
     def _configure_gemini(self):
         """Configures the Gemini API client using environment variables."""
         try:
@@ -129,52 +139,102 @@ class GeminiController(QObject):
             except Exception as e: self.status_update.emit("Error", f"Could not access {path}: {e}")
         return contents
 
-    def _call_gemini_api(self, prompt):
-        """Calls the configured Gemini model's generate_content method."""
-        if not self.model_instance: return "Error: Gemini model not available."
-        if not self.selected_model_name: return "Error: No model selected."
-        self.status_update.emit("Gemini", f"Sending request to {self.selected_model_name}...")
+    # <<< MODIFIED: _call_gemini_api now initiates streaming >>>
+    def _stream_gemini_api(self, prompt: str, context_type: str, sender: str = "Gemini"):
+        """
+        Calls the configured Gemini model's generate_content method with streaming.
+        Emits signals for start, chunks, finish, or error.
+        """
+        if not self.model_instance:
+            self.stream_error.emit("Error: Gemini model not available.", context_type)
+            return
+        if not self.selected_model_name:
+            self.stream_error.emit("Error: No model selected.", context_type)
+            return
+
+        self.status_update.emit(sender, f"Sending request to {self.selected_model_name}...")
         print(f"\n--- Gemini Prompt ({self.selected_model_name}) ---\n{prompt[:500]}...\n--- End Prompt ---")
+
         try:
-            response = self.model_instance.generate_content(prompt)
-            prompt_feedback = getattr(response, 'prompt_feedback', None)
-            if prompt_feedback and prompt_feedback.block_reason:
-                 reason = prompt_feedback.block_reason.name
-                 rating = next((r for r in prompt_feedback.safety_ratings if r.blocked), None)
-                 category = getattr(rating.category, 'name', 'UNKNOWN') if rating else 'UNKNOWN'
-                 self.status_update.emit("Gemini", f"Request blocked: {reason} (Category: {category})")
-                 return f"Error: Blocked by safety filters. Reason: {reason}. Category: {category}."
-            elif not response.candidates:
-                 reason = getattr(response, 'finish_reason', 'UNKNOWN')
-                 self.status_update.emit("Warning", f"Gemini response missing candidates. Finish Reason: {reason}.")
-                 return f"Error: No response candidates. Finish Reason: {reason}."
-            if not hasattr(response, 'text'):
-                 reason = getattr(response, 'finish_reason', 'UNKNOWN')
-                 self.status_update.emit("Warning", f"Gemini response missing 'text'. Finish Reason: {reason}.")
-                 return f"Error: Invalid response structure. Finish Reason: {reason}."
-            response_text = response.text
-            print(f"--- Gemini Response ---\n{response_text[:500]}...\n--- End Response ---")
-            self.status_update.emit("Gemini", "Received response.")
-            return response_text
-        except google_exceptions.PermissionDenied as e: return f"Error: API Permission Denied. Check Key/Permissions. {e}"
-        except google_exceptions.ResourceExhausted as e: return f"Error: API Quota Exceeded. {e}"
+            # Emit stream started *before* API call
+            self.stream_started.emit(sender, context_type)
+
+            # Make the streaming API call
+            response = self.model_instance.generate_content(prompt, stream=True)
+
+            print(f"--- Gemini Response Stream ({context_type}) ---") # Indicate stream start
+            for chunk in response:
+                # Check for safety blocks *within* the stream
+                # Note: The prompt_feedback check is often on the *first* chunk or the *last*.
+                # Candidates might be empty mid-stream if waiting for more data.
+                if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
+                     reason = chunk.prompt_feedback.block_reason.name
+                     rating = next((r for r in chunk.prompt_feedback.safety_ratings if r.blocked), None)
+                     category = getattr(rating.category, 'name', 'UNKNOWN') if rating else 'UNKNOWN'
+                     error_msg = f"Error: Blocked by safety filters. Reason: {reason}. Category: {category}."
+                     self.status_update.emit(sender, f"Request blocked: {reason} (Category: {category})")
+                     self.stream_error.emit(error_msg, context_type)
+                     print(f"Stream blocked: {reason} ({category})")
+                     return # Stop processing stream on block
+
+                # Process valid chunks with text
+                if hasattr(chunk, 'text'):
+                    print(chunk.text, end="", flush=True) # Print chunk to console for debugging
+                    self.stream_chunk_received.emit(chunk.text)
+                # else:
+                    # Handle cases where a chunk might not have text (e.g., finish reason only)
+                    # Usually fine to ignore these intermediate non-text chunks.
+                    # print("[Stream Info Chunk Received - No Text]")
+
+            # Finished iterating through chunks
+            print("\n--- End Gemini Stream ---")
+            self.status_update.emit(sender, "Received full response.")
+            self.stream_finished.emit(sender, context_type)
+
+        # --- Specific API Error Handling ---
+        except google_exceptions.PermissionDenied as e:
+             msg = f"Error: API Permission Denied. Check Key/Permissions. {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
+        except google_exceptions.ResourceExhausted as e:
+             msg = f"Error: API Quota Exceeded. {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
         except google_exceptions.InvalidArgument as e:
-            if "User location is not supported" in str(e): return "Error: Location not supported by API."
-            elif "API key not valid" in str(e): return f"Error: API key not valid. {e}"
-            elif "found no valid candidate" in str(e): return f"Error: No valid candidate found (Safety/Prompt issue?). {e}"
-            return f"Error: Invalid API Argument. {e}"
-        except google_exceptions.NotFound as e: return f"Error: Model/Resource Not Found. {e}"
-        except google_exceptions.FailedPrecondition as e: return f"Error: API Precondition Failed (Billing?). {e}"
-        except google_exceptions.InternalServerError as e: return f"Error: API Internal Server Error. {e}"
-        except google_exceptions.ServiceUnavailable as e: return f"Error: API Service Unavailable. {e}"
-        except Exception as e: return f"Error: API call failed: {type(e).__name__} - {e}"
+            if "User location is not supported" in str(e): msg = "Error: Location not supported by API."
+            elif "API key not valid" in str(e): msg = f"Error: API key not valid. {e}"
+            # "found no valid candidate" might indicate a safety block *before* any chunk yielded text
+            elif "found no valid candidate" in str(e): msg = f"Error: No valid candidate found (Safety/Prompt issue?). {e}"
+            else: msg = f"Error: Invalid API Argument. {e}"
+            self.stream_error.emit(msg, context_type); print(msg)
+        except google_exceptions.NotFound as e:
+             msg = f"Error: Model/Resource Not Found. {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
+        except google_exceptions.FailedPrecondition as e:
+             msg = f"Error: API Precondition Failed (Billing?). {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
+        except google_exceptions.InternalServerError as e:
+             msg = f"Error: API Internal Server Error. {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
+        except google_exceptions.ServiceUnavailable as e:
+             msg = f"Error: API Service Unavailable. {e}"
+             self.stream_error.emit(msg, context_type); print(msg)
+        # --- Generic Exception Handling ---
+        except Exception as e:
+            error_msg = f"Error: API stream call failed: {type(e).__name__} - {e}"
+            self.stream_error.emit(error_msg, context_type)
+            print(error_msg)
+        # --- Ensure status update if error happens ---
+        finally:
+            # Update status? The error signals should suffice.
+            pass
+
 
     # request_explanation: called by right-click OR /explain command
     def request_explanation(self, file_paths):
-        """Generates an explanation for the content of the given files."""
+        """Initiates a streaming explanation for the content of the given files."""
         contents = self._read_files(file_paths)
         if not contents:
-            self.chat_response_ready.emit("GemNet", "No files were read successfully to explain.")
+            # Use stream_error for consistency, even if it's not a direct API error
+            self.stream_error.emit("No files were read successfully to explain.", 'chat')
             return
 
         prompt = "You are a helpful assistant integrated into a development tool called GemNet.\n"
@@ -186,33 +246,28 @@ class GeminiController(QObject):
             prompt += "---\n"
         prompt += "Provide the explanation below:"
 
-        explanation = self._call_gemini_api(prompt)
-        # explanation_ready.emit("Gemini", explanation) # Keep if needed elsewhere
-        self.chat_response_ready.emit("Gemini", explanation) # Send to chat
+        self._stream_gemini_api(prompt, context_type='chat', sender="Gemini") # Initiate stream
         self.current_context = {}
 
     # request_edit: called ONLY when processing an edit instruction message (after context is set)
     def request_edit(self, file_paths, instructions):
-        """Generates modified content for the first file based on instructions (for file-based edit)."""
+        """Initiates a streaming edit for the first file based on instructions."""
         contents = self._read_files(file_paths)
         if not contents or not file_paths:
-            self.chat_response_ready.emit("GemNet", "Cannot edit: File(s) could not be read or path missing."); return
+            self.stream_error.emit("Cannot edit: File(s) could not be read or path missing.", 'editor')
+            return
 
         target_file_path = file_paths[0]
         target_filename = os.path.basename(target_file_path)
         target_content = contents.get(target_file_path)
 
         if target_content is None:
-             self.chat_response_ready.emit("GemNet", f"Could not read '{target_filename}' for editing."); return
+             self.stream_error.emit(f"Could not read '{target_filename}' for editing.", 'editor')
+             return
 
         prompt = self._build_edit_prompt(target_filename, target_content, instructions, contents)
-        modified_content = self._call_gemini_api(prompt)
-
-        if modified_content and not modified_content.startswith("Error:"):
-            self.editor_content_generated.emit(modified_content) # Signal to update editor
-            self.chat_response_ready.emit("Gemini", f"OK, placed suggested changes for {target_filename} into the editor.")
-        elif modified_content: self.chat_response_ready.emit("Gemini", modified_content) # Show API error
-        else: self.chat_response_ready.emit("GemNet", "Failed to generate edit, no response from API.")
+        # Edits update the editor pane
+        self._stream_gemini_api(prompt, context_type='editor', sender="Gemini") # Initiate stream
 
     # <<< NEW HELPER for edit prompts >>>
     def _build_edit_prompt(self, target_filename, target_content, instructions, context_files=None):
@@ -248,7 +303,7 @@ class GeminiController(QObject):
 
     # <<< MODIFIED process_user_chat >>>
     def process_user_chat(self, message):
-        """Processes chat messages, including commands like /create, /explain, /edit, /explain_editor, /edit_editor."""
+        """Processes chat messages, handling context, commands, and initiating streams."""
         print(f"[Controller DEBUG] Processing chat message: '{message[:100]}...'")
 
         # --- Check for active edit context FIRST ---
@@ -257,30 +312,46 @@ class GeminiController(QObject):
             files = self.current_context.get('files')
             if files:
                  print("[Controller DEBUG] Handling message as edit instruction (context: file).")
-                 self.request_edit(files, message) # message IS the instruction here
-                 self.current_context = {} # Clear context *after* edit attempt
+                 self.request_edit(files, message) # Initiates stream for editor
+                 self.current_context = {} # Clear context *after* initiating stream
                  return
-            else: # Should not happen, but clear context if invalid
+            else:
                  print("[Controller WARNING] Edit context active but no files found.")
+                 self.stream_error.emit("Internal Error: Edit context lost file information.", 'editor')
                  self.current_context = {}
+                 return
         elif action == 'edit_editor': # Edit instruction for the active editor tab
             print("[Controller DEBUG] Handling message as edit instruction (context: editor).")
             editor_path = self.current_context.get('path', 'current tab') # Get path if available
             editor_content = self.editor_pane.get_current_content()
             if editor_content is not None:
-                 # Use the helper to build the prompt
-                 prompt = self._build_edit_prompt(os.path.basename(editor_path) if editor_path else 'current tab',
-                                                  editor_content, message)
-                 modified_content = self._call_gemini_api(prompt)
-                 if modified_content and not modified_content.startswith("Error:"):
-                     self.editor_content_generated.emit(modified_content) # Signal to update editor
-                     self.chat_response_ready.emit("Gemini", f"OK, placed suggested changes for {os.path.basename(editor_path)} into the editor.")
-                 elif modified_content: self.chat_response_ready.emit("Gemini", modified_content) # Show API error
-                 else: self.chat_response_ready.emit("GemNet", "Failed to generate edit, no response from API.")
+                 filename_hint = os.path.basename(editor_path) if editor_path and editor_path != 'current tab' else 'current tab'
+                 prompt = self._build_edit_prompt(filename_hint, editor_content, message)
+                 self._stream_gemini_api(prompt, context_type='editor', sender="Gemini") # Initiate stream
             else:
-                 self.chat_response_ready.emit("GemNet", "Cannot edit: No active editor tab found.")
-            self.current_context = {} # Clear context *after* edit attempt
+                 self.stream_error.emit("Cannot edit: No active editor tab found or content is inaccessible.", 'editor')
+            self.current_context = {} # Clear context *after* initiating stream
             return
+        elif action == 'create': # File creation description
+            print("[Controller DEBUG] Handling message as create description.")
+            filename = self.current_context.get('filename')
+            description = message # The message *is* the description here
+            if filename:
+                content_prompt = "You are a helpful file generation assistant called GemNet.\n"
+                content_prompt += f"The user wants to create a file named '{filename}' with the following purpose/content described:\n"
+                content_prompt += f"Description: '{description}'\n\n"
+                content_prompt += "Generate ONLY the raw file content based on the description.\n"
+                content_prompt += "IMPORTANT: Do NOT include the filename, explanations, introductions, apologies, ```markdown formatting```, or any text other than the required file content itself."
+                # Set context specific to file creation for the handler
+                self.current_context['action'] = 'creating_file' # Update context state
+                self._stream_gemini_api(content_prompt, context_type='file_create', sender="Gemini")
+                # Don't clear full context yet, handler needs filename
+            else:
+                 print("[Controller WARNING] Create context active but no filename found.")
+                 self.stream_error.emit("Internal Error: Create context lost filename information.", 'chat')
+                 self.current_context = {}
+            return
+
 
         # --- If no active context, check for commands ---
         parts = message.strip().split(maxsplit=1)
@@ -292,27 +363,23 @@ class GeminiController(QObject):
 
         # --- /create ---
         if command == "/create":
-            create_parts = args_str.split(maxsplit=1)
-            if len(create_parts) == 2:
-                filename_raw, description = create_parts
-                # ... (rest of /create logic remains the same) ...
-                safe_filename = "".join(c for c in filename_raw if c.isalnum() or c in ('.', '_', '-', ' ')).strip()
-                if not safe_filename: safe_filename = "gemini_generated_file.txt"
-                if safe_filename in [".", "_", "-"]: safe_filename = f"gemini_generated_{safe_filename}.txt"
-                print(f"[Controller DEBUG] Sanitized filename: '{safe_filename}'")
-                content_prompt = "..." # Build prompt as before
-                content_prompt = "You are a helpful file generation assistant called GemNet.\n"
-                content_prompt += f"The user wants to create a file named '{safe_filename}' with the following purpose/content described:\n"
-                content_prompt += f"Description: '{description}'\n\n"
-                content_prompt += "Generate ONLY the raw file content based on the description.\n"
-                content_prompt += "IMPORTANT: Do NOT include the filename, explanations, introductions, apologies, ```markdown formatting```, or any text other than the required file content itself."
-                content_response = self._call_gemini_api(content_prompt)
-                if content_response and not content_response.startswith("Error:"):
-                     self.file_content_generated.emit(safe_filename, content_response)
-                elif content_response: self.chat_response_ready.emit("Gemini", f"Error creating {safe_filename}: {content_response}")
-                else: self.chat_response_ready.emit("GemNet", f"Failed to create {safe_filename}, no API response.")
-            else: self.chat_response_ready.emit("GemNet", "Usage: /create <filename> <description>")
-            return # Handled command
+             filename_raw = args_str
+             if filename_raw:
+                 # Sanitize filename
+                 safe_filename = "".join(c for c in filename_raw if c.isalnum() or c in ('.', '_', '-', ' ')).strip()
+                 if not safe_filename: safe_filename = "gemini_generated_file.txt"
+                 if safe_filename in [".", "_", "-"]: safe_filename = f"gemini_generated_{safe_filename}.txt"
+                 print(f"[Controller DEBUG] Sanitized filename for /create: '{safe_filename}'")
+
+                 # Set context for the *next* message (which will be the description)
+                 self.set_context({'action': 'create', 'filename': safe_filename})
+                 prompt_msg = f"Creating '{safe_filename}'. Provide description/content prompt in next message."
+                 self.edit_context_set_from_chat.emit(prompt_msg) # Use same signal for generic prompt
+                 self.status_update.emit("GemNet", f"Ready for description for {safe_filename}...")
+
+             else: self.stream_error.emit("Usage: /create <filename>\n(Provide description in the next message)", 'chat')
+             return # Handled command (waits for next message)
+
 
         # --- /explain ---
         elif command == "/explain":
@@ -321,11 +388,11 @@ class GeminiController(QObject):
                  full_path = os.path.join(current_dir, filename)
                  print(f"[Controller DEBUG] /explain path: {full_path}")
                  if os.path.isfile(full_path):
-                     self.chat_response_ready.emit("User", f"Explain file: {filename}")
+                     # self.chat_response_ready.emit("User", f"Explain file: {filename}") # User msg added by ChatPane now
                      self.status_update.emit("GemNet", f"Requesting explanation for {filename}...")
-                     self.request_explanation([full_path]) # This sends result to chat
-                 else: self.chat_response_ready.emit("GemNet", f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.")
-            else: self.chat_response_ready.emit("GemNet", "Usage: /explain <filename>")
+                     self.request_explanation([full_path]) # Initiates stream for chat
+                 else: self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
+            else: self.stream_error.emit("Usage: /explain <filename>", 'chat')
             return # Handled command
 
         # --- /edit ---
@@ -340,8 +407,8 @@ class GeminiController(QObject):
                      prompt_msg = f"Editing '{filename}'. Provide instructions in next message."
                      self.edit_context_set_from_chat.emit(prompt_msg) # Ask main to add chat msg
                      self.status_update.emit("GemNet", f"Ready for edit instructions for {filename}...")
-                 else: self.chat_response_ready.emit("GemNet", f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.")
-             else: self.chat_response_ready.emit("GemNet", "Usage: /edit <filename>")
+                 else: self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
+             else: self.stream_error.emit("Usage: /edit <filename>", 'chat')
              return # Handled command (context set, waiting for next message)
 
         # --- /explain_editor ---
@@ -352,7 +419,7 @@ class GeminiController(QObject):
             filename_hint = os.path.basename(editor_path) if editor_path else "current tab"
 
             if editor_content is not None:
-                 self.chat_response_ready.emit("User", f"Explain content of: {filename_hint}")
+                 # User msg added by ChatPane
                  self.status_update.emit("GemNet", f"Requesting explanation for {filename_hint}...")
 
                  prompt = "You are a helpful assistant integrated into a development tool called GemNet.\n"
@@ -363,38 +430,68 @@ class GeminiController(QObject):
                  prompt += "\n---\n"
                  prompt += "Provide the explanation below:"
 
-                 explanation = self._call_gemini_api(prompt)
-                 self.chat_response_ready.emit("Gemini", explanation) # Send explanation to chat
+                 self._stream_gemini_api(prompt, context_type='chat', sender="Gemini") # Initiate stream
             else:
-                 self.chat_response_ready.emit("GemNet", "Error: No active editor tab found to explain.")
+                 self.stream_error.emit("Error: No active editor tab found to explain.", 'chat')
             return # Handled command
 
         # --- /edit_editor ---
         elif command == "/edit_editor":
              print("[Controller DEBUG] Detected /edit_editor command.")
              editor_path = self.editor_pane.get_current_path() # Check if a tab is open
-             if editor_path is not None: # Check path, content might be empty initially
-                 filename_hint = os.path.basename(editor_path) if editor_path else "current tab"
-                 self.set_context({'action': 'edit_editor', 'path': editor_path}) # Context for *next* message
+             # Check content as well, maybe? No, allow editing empty file. Check path is enough.
+             current_widget = self.editor_pane.tab_widget.currentWidget()
+             if current_widget: # Check if *any* tab is open
+                 editor_path_prop = current_widget.property("file_path") # Get path if it has one
+                 filename_hint = os.path.basename(editor_path_prop) if editor_path_prop else "current tab"
+                 self.set_context({'action': 'edit_editor', 'path': editor_path_prop if editor_path_prop else 'current tab'}) # Context for *next* message
                  prompt_msg = f"Editing content of '{filename_hint}'. Provide instructions in next message."
                  self.edit_context_set_from_chat.emit(prompt_msg) # Ask main to add chat msg
                  self.status_update.emit("GemNet", f"Ready for edit instructions for {filename_hint}...")
              else:
-                  self.chat_response_ready.emit("GemNet", "Error: No active editor tab found to edit.")
+                  self.stream_error.emit("Error: No active editor tab found to edit.", 'chat')
              return # Handled command (context set, waiting for next message)
 
         # --- Standard Chat (if no command and no context) ---
         else:
             print("[Controller DEBUG] Handling as standard chat message.")
+            # User msg added by ChatPane
             prompt = "You are a helpful assistant called GemNet. Respond concisely and helpfully.\n"
+            # TODO: Add chat history to prompt for better context? (Adds complexity)
             prompt += f"\nUser: {message}\n\nAssistant:"
-            chat_response = self._call_gemini_api(prompt)
-            self.chat_response_ready.emit("Gemini", chat_response)
+            self._stream_gemini_api(prompt, context_type='chat', sender="Gemini") # Initiate stream
             # No context to clear here usually
 
     def set_context(self, context):
         """Allows setting context (like files selected for editing)."""
         print(f"[Controller DEBUG] Setting context: {context}")
         self.current_context = context
+
+    # <<< NEW Method to handle generated file content from stream >>>
+    def finalize_generated_file(self, full_content):
+        """Saves the complete content from a 'file_create' stream."""
+        filename = self.current_context.get('filename')
+        action = self.current_context.get('action') # Should be 'creating_file'
+
+        if action == 'creating_file' and filename:
+            print(f"[Controller DEBUG] Finalizing generated file: {filename}")
+             # Trigger MainWindow to save the file
+            # We lost the original signal, so we need a new way or reuse an old one.
+            # Let's reuse the status update temporarily, MainWindow can listen for it.
+            # A dedicated signal would be better.
+            # self.file_content_generated.emit(filename, full_content) # Ideal, but need to add back
+
+            # Workaround: Use chat message to signal completion
+            self.stream_finished.emit("GemNet", f"create_success:{filename}") # Send filename in finish signal
+
+            # Clear the create context
+            self.current_context = {}
+
+        elif action == 'creating_file' and not filename:
+            print("[Controller ERROR] Tried to finalize file creation, but filename missing from context.")
+            self.stream_error.emit("Internal Error: Filename lost during file creation.", 'chat')
+            self.current_context = {}
+        # else: This might be called inappropriately if context wasn't 'creating_file'
+
 
 # --- END OF FILE gemini_controller.py ---

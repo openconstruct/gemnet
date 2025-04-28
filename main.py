@@ -38,6 +38,9 @@ class MainWindow(QMainWindow):
             editor_pane_ref=self.editor_pane # Pass editor pane reference
         )
 
+        # --- Store intermediate file content for /create ---
+        self._streaming_file_content = "" # Temporary buffer
+
         self.setup_layout()
         self.setup_menus()
         self.connect_signals() # Connect signals after controller is created
@@ -61,52 +64,36 @@ class MainWindow(QMainWindow):
         # --- File Menu ---
         file_menu = menu_bar.addMenu("File")
         open_action = file_menu.addAction("Open File(s)...")
-        open_action.triggered.connect(self.editor_pane.request_open_files) # Connect to editor's open function
-
+        open_action.triggered.connect(self.editor_pane.request_open_files)
         save_action = file_menu.addAction("Save")
-        save_action.triggered.connect(self.editor_pane.save_current_file) # Connect to editor's save function
-        # TODO: Add Save As action
-
+        save_action.triggered.connect(self.editor_pane.save_current_file)
         reload_action = file_menu.addAction("Reload File")
-        reload_action.triggered.connect(self.editor_pane.reload_current_file) # Connect to editor's reload function
-
+        reload_action.triggered.connect(self.editor_pane.reload_current_file)
         file_menu.addSeparator()
-
-        refresh_files_action = file_menu.addAction("Refresh Files View") # Renamed slightly for clarity
-        refresh_files_action.triggered.connect(self.file_pane.refresh) # Connect to FilePane's refresh method
-
+        refresh_files_action = file_menu.addAction("Refresh Files View")
+        refresh_files_action.triggered.connect(self.file_pane.refresh)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
-        exit_action.triggered.connect(self.close) # Close the main window
-
+        exit_action.triggered.connect(self.close)
 
         # --- View Menu ---
         view_menu = menu_bar.addMenu("View")
         theme_menu = view_menu.addMenu("Themes")
         self.theme_group = QActionGroup(self)
         self.theme_group.setExclusive(True)
-
         dark_action = QAction("Dark Theme", self, checkable=True)
         dark_action.triggered.connect(lambda: self.theme_manager.set_theme("dark"))
-        theme_menu.addAction(dark_action)
-        self.theme_group.addAction(dark_action)
-
+        theme_menu.addAction(dark_action); self.theme_group.addAction(dark_action)
         light_action = QAction("Light Theme", self, checkable=True)
         light_action.triggered.connect(lambda: self.theme_manager.set_theme("light"))
-        theme_menu.addAction(light_action)
-        self.theme_group.addAction(light_action)
-
-        # Set initial check state based on the default theme applied
-        if self.theme_manager.themes.get("dark"): # Check if dark theme exists
-             dark_action.setChecked(True) # Assume dark is default if it exists
-        # Add logic here if light is the default instead
+        theme_menu.addAction(light_action); self.theme_group.addAction(light_action)
+        if self.theme_manager.themes.get("dark"): dark_action.setChecked(True)
 
         # --- Model Menu ---
         model_menu = menu_bar.addMenu("Model")
         self.select_model_action = model_menu.addAction("Select Model...")
         self.select_model_action.triggered.connect(self.open_model_selection_dialog)
-        self.select_model_action.setEnabled(False) # Disabled until models load
-
+        self.select_model_action.setEnabled(False)
         model_menu.addSeparator()
         refresh_models_action = model_menu.addAction("Refresh Model List")
         refresh_models_action.triggered.connect(self.gemini_controller.update_available_models)
@@ -126,87 +113,90 @@ class MainWindow(QMainWindow):
         available = self.gemini_controller.available_models
         current = self.gemini_controller.selected_model_name
         success, new_model_name = ModelSelectionDialog.get_model(available, current, self)
-
         if success and new_model_name != current:
             self.status_bar.showMessage(f"Switching model to {new_model_name}...")
             self.gemini_controller.set_selected_model(new_model_name)
-        elif success:
-             self.status_bar.showMessage(f"Model selection unchanged ({current}).", 3000)
-        else:
-            self.status_bar.showMessage("Model selection cancelled.", 3000)
+        elif success: self.status_bar.showMessage(f"Model selection unchanged ({current}).", 3000)
+        else: self.status_bar.showMessage("Model selection cancelled.", 3000)
 
+    # <<< MODIFIED connect_signals >>>
     def connect_signals(self):
         """Connect signals between UI elements and the controller."""
         # --- UI -> Controller / Other UI ---
-        # File Pane actions
-        self.file_pane.open_files_requested.connect(self.editor_pane.open_files) # Right-click -> Open
-        self.file_pane.explain_files_requested.connect(self.handle_explain_request) # Right-click -> Explain
-        self.file_pane.edit_files_requested.connect(self.handle_edit_request)       # Right-click -> Edit (sets context)
-        # Chat input
-        self.chat_pane.user_message_submitted.connect(self.handle_chat_message)     # Handles commands & instructions
-        # Editor Pane actions
-        self.editor_pane.status_message_requested.connect(lambda msg: self.status_bar.showMessage(msg, 4000)) # Editor -> Status Bar
+        self.file_pane.open_files_requested.connect(self.editor_pane.open_files)
+        self.file_pane.explain_files_requested.connect(self.handle_explain_request)
+        self.file_pane.edit_files_requested.connect(self.handle_edit_request)
+        self.chat_pane.user_message_submitted.connect(self.handle_chat_message)
+        self.editor_pane.status_message_requested.connect(lambda msg: self.status_bar.showMessage(msg, 4000))
 
         # --- Controller -> UI ---
-        # Gemini responses/output
-        self.gemini_controller.explanation_ready.connect(lambda sender, msg: self.chat_pane.add_message(sender, msg)) # Handles explain output (mostly unused now?)
-        self.gemini_controller.chat_response_ready.connect(lambda sender, msg: self.chat_pane.add_message(sender, msg)) # Handles general/error chat output
-        self.gemini_controller.file_content_generated.connect(self.handle_generated_file) # Handles /create output
-        self.gemini_controller.editor_content_generated.connect(self.editor_pane.set_current_content) # Handles edit output (/edit, /edit_editor)
         # Status/Info updates
         self.gemini_controller.status_update.connect(self.update_status_bar)
         self.gemini_controller.initialization_status.connect(self.handle_initialization_status)
         self.gemini_controller.available_models_updated.connect(self.handle_available_models_update)
-        # Signals for setting up chat-based edit flows
-        self.gemini_controller.edit_file_requested_from_chat.connect(self.handle_edit_file_requested_from_chat) # Handles /edit <file> step 1 (open file)
-        self.gemini_controller.edit_context_set_from_chat.connect(lambda msg: self.chat_pane.add_message("GemNet", msg, is_status=True)) # Handles /edit or /edit_editor setup message
+        # Signals for setting up chat-based edit/create flows
+        self.gemini_controller.edit_file_requested_from_chat.connect(self.handle_edit_file_requested_from_chat)
+        self.gemini_controller.edit_context_set_from_chat.connect(lambda msg: self.chat_pane.add_message("GemNet", msg, is_status=True))
+
+        # --- Controller -> UI (Streaming) ---
+        self.gemini_controller.stream_started.connect(self.handle_stream_started) # Route based on context
+        self.gemini_controller.stream_chunk_received.connect(self.handle_stream_chunk) # Route based on context
+        self.gemini_controller.stream_finished.connect(self.handle_stream_finished) # Route based on context
+        self.gemini_controller.stream_error.connect(self.handle_stream_error)       # Route based on context
+
+
+        # --- REMOVED OLD SIGNALS ---
+        # self.gemini_controller.explanation_ready.connect(lambda sender, msg: self.chat_pane.add_message(sender, msg))
+        # self.gemini_controller.chat_response_ready.connect(lambda sender, msg: self.chat_pane.add_message(sender, msg))
+        # self.gemini_controller.file_content_generated.connect(self.handle_generated_file)
+        # self.gemini_controller.editor_content_generated.connect(self.editor_pane.set_current_content)
+
 
     @Slot(str, str)
     def update_status_bar(self, sender, message):
         """Updates the status bar with messages from components (Controller)."""
         prefix = f"[{sender}] " if sender not in ["Error", "Warning", "GemNet"] else ""
-        timeout = 5000 # Default timeout
-        # Special handling for model loading success
+        timeout = 5000
         if sender == "GemNet" and "loaded successfully" in message:
              parts = message.split("'")
-             if len(parts) >= 3:
-                 loaded_model = parts[1]
-                 self.status_bar.showMessage(f"Model '{loaded_model}' ready.", 4000)
-                 return # Don't show generic message too
-             else:
-                 timeout = 4000 # Shorter timeout for generic success
-        # Persistent message for API key error
-        elif "API Key Error" in message:
-             timeout = 0 # 0 means show indefinitely
+             if len(parts) >= 3: loaded_model = parts[1]; self.status_bar.showMessage(f"Model '{loaded_model}' ready.", 4000); return
+             else: timeout = 4000
+        elif "API Key Error" in message or "Error:" in message: timeout = 0 # Persistent error
+        elif sender == "Gemini" and "Sending request" in message: timeout = 1500 # Short indicator
+        elif sender == "Gemini" and "Received full response" in message: timeout = 3000 # Confirmation
 
         self.status_bar.showMessage(prefix + message, timeout)
 
     @Slot(str, bool)
     def handle_initialization_status(self, message, success):
         """Handles the initial status message from the controller."""
-        if not success and "API Key Error" in message:
-             self.status_bar.showMessage(message) # Persistent API key error
-        else:
-             self.status_bar.showMessage(message, 5000)
+        timeout = 5000
+        if not success and "API Key Error" in message: timeout = 0 # Persistent
+        self.status_bar.showMessage(message, timeout)
 
     # --- Action Handlers ---
 
-    # Triggered by RIGHT-CLICK -> Explain on File Pane
     def handle_explain_request(self, file_paths):
         """Handles the request to explain files selected in the File Pane."""
-        self.chat_pane.add_message("User", f"Explain file(s): {', '.join(map(os.path.basename, file_paths))}")
+        # User message is added in ChatPane now
+        # self.chat_pane.add_message("User", f"Explain file(s): {', '.join(map(os.path.basename, file_paths))}")
+        self.chat_pane.add_message("User", f"/explain {', '.join(map(os.path.basename, file_paths))}", is_user=True) # Show command used
         self.update_status_bar("GemNet", f"Requesting explanation for {len(file_paths)} file(s)...")
-        # Controller's request_explanation now sends output directly to chat
         self.gemini_controller.request_explanation(file_paths)
 
-    # Triggered by RIGHT-CLICK -> Edit on File Pane
     def handle_edit_request(self, file_paths):
         """Sets up the context for editing files selected in the File Pane."""
         if file_paths:
             # 1. Open the first selected file in the editor
-            self.editor_pane.open_files([file_paths[0]])
+            # Use return value to ensure it was opened successfully before proceeding
+            opened_paths = self.editor_pane.open_files([file_paths[0]])
+            if not opened_paths or opened_paths[0] != file_paths[0]:
+                 self.update_status_bar("Error", f"Failed to open {os.path.basename(file_paths[0])} for editing.")
+                 self.chat_pane.add_message("Error", f"Failed to open '{os.path.basename(file_paths[0])}' for editing.", is_error=True)
+                 return
+
             # 2. Set controller context for the *next* chat message
-            self.gemini_controller.set_context({'action': 'edit', 'files': file_paths})
+            self.gemini_controller.set_context({'action': 'edit', 'files': file_paths}) # Use full paths list for context
             # 3. Prompt user in chat to provide instructions
             base_filename = os.path.basename(file_paths[0])
             self.chat_pane.add_message("GemNet", f"Editing {base_filename}.\nPlease provide instructions in the chat.", is_status=True)
@@ -214,77 +204,134 @@ class MainWindow(QMainWindow):
         else:
              self.update_status_bar("Warning", "Edit requested but no file paths provided.")
 
-    # Triggered by Chat Input field submission
     def handle_chat_message(self, message):
         """Processes user input from the chat, routing to controller."""
-        # Check context *before* echoing to avoid echoing edit instructions
-        action = self.gemini_controller.current_context.get('action')
-        if action not in ['edit', 'edit_editor']:
-            self.chat_pane.add_message("User", message) # Echo normal chat/commands
-        else:
-            # Optionally add the instruction to the chat for clarity, but maybe label it
-            filename_hint = "current editor"
-            if action == 'edit':
-                files = self.gemini_controller.current_context.get('files')
-                if files: filename_hint = os.path.basename(files[0])
-            elif action == 'edit_editor':
-                 path = self.gemini_controller.current_context.get('path')
-                 if path: filename_hint = os.path.basename(path)
-
-            self.chat_pane.add_message("User", f"[Edit Instruction for {filename_hint}]: {message}")
-
-
-        # Let the controller handle parsing commands, context, or standard chat
+        # Controller now handles context and command parsing internally
         self.gemini_controller.process_user_chat(message)
 
-    @Slot(str, str)
-    def handle_generated_file(self, filename, content):
-        """Handles the signal to save content generated by Gemini to a new file."""
-        # Save relative to file_pane's current directory if possible?
-        current_view_dir = self.file_pane.get_current_view_path()
-        # Check if current_view_dir is sensible (not root, exists)
-        save_dir = QDir.currentPath() # Default to app CWD
-        if os.path.isdir(current_view_dir) and current_view_dir != QDir.rootPath():
-             save_dir = current_view_dir
-             print(f"[DEBUG MainWindow] Saving generated file in File Pane dir: {save_dir}")
-        else:
-             print(f"[DEBUG MainWindow] Saving generated file in CWD: {save_dir}")
-
-
-        save_path = os.path.join(save_dir, filename)
-        try:
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            # Use status=True for GemNet messages for potential styling
-            # Show relative path if saved in view dir, otherwise just filename
-            display_name = filename
-            if save_dir == current_view_dir:
-                 display_name = os.path.join(os.path.basename(current_view_dir), filename) # Show parent dir + file
-            else:
-                 display_name = f"{filename} (in app directory)"
-
-            self.chat_pane.add_message("GemNet", f"Created file: {display_name}", is_status=True)
-            self.status_bar.showMessage(f"File created: {filename}", 4000)
-            self.file_pane.refresh() # Refresh file view
-        except Exception as e:
-            self.chat_pane.add_message("Error", f"Failed to create file {filename}: {e}")
-            self.status_bar.showMessage(f"Error creating file: {e}", 5000)
+    # --- REMOVED handle_generated_file (handled via streaming finish) ---
+    # @Slot(str, str) def handle_generated_file(...): ...
 
     @Slot(str)
     def handle_edit_file_requested_from_chat(self, full_path):
         """Slot to open a file in the editor when requested via '/edit <file>' command."""
         print(f"[MainWindow DEBUG] Received request to open for edit: {full_path}")
         if os.path.isfile(full_path):
-             self.editor_pane.open_files([full_path])
+             opened_paths = self.editor_pane.open_files([full_path])
+             if not opened_paths:
+                  self.chat_pane.add_message("Error", f"Failed to open '{os.path.basename(full_path)}' in editor.", is_error=True)
+                  self.gemini_controller.set_context({}) # Clear broken context
         else:
-             # This case should ideally be caught by the controller, but good fallback
-             self.chat_pane.add_message("Error", f"Cannot open file for edit: '{full_path}' not found.")
-             self.status_bar.showMessage(f"Error: File not found for edit request: {full_path}", 5000)
+             self.chat_pane.add_message("Error", f"Cannot open file for edit: '{full_path}' not found.", is_error=True)
+             self.gemini_controller.set_context({}) # Clear broken context
+
+
+    # --- Streaming Handlers (Routing) ---
+    @Slot(str, str)
+    def handle_stream_started(self, sender, context_type):
+        """Routes stream_started signal based on context."""
+        print(f"[MainWindow] Routing stream_started: {sender} / {context_type}")
+        if context_type == 'editor':
+            self.editor_pane.handle_stream_started(sender, context_type)
+        elif context_type == 'chat' or context_type == 'file_create':
+            # Reset file content buffer if starting a new file create stream
+            if context_type == 'file_create':
+                 self._streaming_file_content = ""
+            self.chat_pane.handle_stream_started(sender, context_type)
+        else:
+            print(f"[MainWindow WARN] Unknown stream context started: {context_type}")
+
+    @Slot(str)
+    def handle_stream_chunk(self, chunk):
+        """Routes stream_chunk_received signal based on controller's *current* context."""
+        # We need to know the context the controller is *currently* processing
+        # This is a bit fragile. Relying on controller context state.
+        active_context = self.gemini_controller.current_context.get('action') # e.g., 'edit', 'edit_editor', 'creating_file', None (for chat/explain)
+        # print(f"[MainWindow] Routing chunk. Active context: {active_context}") # DEBUG - Can be noisy
+
+        if active_context in ['edit', 'edit_editor']:
+            self.editor_pane.handle_stream_chunk(chunk)
+        elif active_context == 'creating_file':
+             self._streaming_file_content += chunk # Buffer content
+             self.chat_pane.handle_stream_chunk(chunk) # Also show in chat
+        else: # Default to chat pane (covers None, 'explain', maybe initial 'create' state?)
+            self.chat_pane.handle_stream_chunk(chunk)
+
+    @Slot(str, str)
+    def handle_stream_finished(self, sender, context_type):
+        """Routes stream_finished signal and handles file creation finalization."""
+        print(f"[MainWindow] Routing stream_finished: {sender} / {context_type}")
+
+        # Special handling for file creation success
+        if context_type.startswith("create_success:"):
+            filename = context_type.split(":", 1)[1]
+            print(f"[MainWindow] Finalizing streamed file creation for: {filename}")
+            # Now call the save logic with the buffered content
+            self._save_generated_file(filename, self._streaming_file_content)
+            self._streaming_file_content = "" # Clear buffer
+            # Also finalize the chat visuals for the create stream
+            self.chat_pane.handle_stream_finished(sender, 'file_create') # Use generic type for visuals
+            # Ensure controller context is cleared if necessary (should be done in controller)
+            if self.gemini_controller.current_context.get('action') == 'creating_file':
+                 self.gemini_controller.set_context({})
+
+        elif context_type == 'editor':
+            self.editor_pane.handle_stream_finished(sender, context_type)
+        elif context_type == 'chat' or context_type == 'file_create': # Handle finish for chat/file_create visuals
+            self.chat_pane.handle_stream_finished(sender, context_type)
+        else:
+            print(f"[MainWindow WARN] Unknown stream context finished: {context_type}")
+
+    @Slot(str, str)
+    def handle_stream_error(self, error_message, context_type):
+        """Routes stream_error signal based on context."""
+        print(f"[MainWindow] Routing stream_error: {context_type} - {error_message}")
+        if context_type == 'editor':
+            self.editor_pane.handle_stream_error(error_message, context_type)
+        elif context_type == 'chat' or context_type == 'file_create':
+             self.chat_pane.handle_stream_error(error_message, context_type)
+             # If file creation failed, clear buffer
+             if context_type == 'file_create':
+                  self._streaming_file_content = ""
+        else:
+            print(f"[MainWindow WARN] Unknown stream context errored: {context_type}")
+            # Show generic error in chat pane as fallback?
+            self.chat_pane.add_message("Error", f"({context_type}) {error_message}", is_error=True)
+
+        # Ensure controller context is cleared on error to prevent stuck states
+        self.gemini_controller.set_context({})
+
+
+    # <<< NEW Helper to save generated file content >>>
+    def _save_generated_file(self, filename, content):
+        """Saves the buffered content generated by Gemini to a new file."""
+        current_view_dir = self.file_pane.get_current_view_path()
+        save_dir = QDir.currentPath() # Default
+        if os.path.isdir(current_view_dir) and current_view_dir != QDir.rootPath():
+             save_dir = current_view_dir
+             print(f"[DEBUG MainWindow] Saving generated file in File Pane dir: {save_dir}")
+        else:
+             print(f"[DEBUG MainWindow] Saving generated file in CWD: {save_dir}")
+
+        save_path = os.path.join(save_dir, filename)
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            display_name = filename
+            if save_dir == current_view_dir: display_name = os.path.join(os.path.basename(current_view_dir), filename)
+            else: display_name = f"{filename} (in app directory)"
+
+            # Use add_message for consistency, marked as status
+            self.chat_pane.add_message("GemNet", f"Created file: {display_name}", is_status=True)
+            self.status_bar.showMessage(f"File created: {filename}", 4000)
+            self.file_pane.refresh()
+        except Exception as e:
+            self.chat_pane.add_message("Error", f"Failed to save created file {filename}: {e}", is_error=True)
+            self.status_bar.showMessage(f"Error saving file: {e}", 5000)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    # Force style for better font rendering on some platforms (optional)
     # app.setStyle('Fusion')
     window = MainWindow()
     window.show()
