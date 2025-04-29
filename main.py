@@ -106,8 +106,7 @@ class MainWindow(QMainWindow):
             "light": "Default Light",
             "gruvbox_dark": "Gruvbox Dark",
             "solarized_dark": "Solarized Dark",
-            "nord": "Nord",
-        }
+           }
         default_theme_key = "dark" # Set your desired default theme key here
 
         # Add actions for each theme
