@@ -1,0 +1,262 @@
+/* Nord Theme for GemNet */
+
+/* Nord Palette */
+/* Polar Night (Dark BG) */
+/* nord0: #2E3440 */
+/* nord1: #3B4252 */
+/* nord2: #434C5E */
+/* nord3: #4C566A */
+/* Snow Storm (FG) */
+/* nord4: #D8DEE9 */
+/* nord5: #E5E9F0 */
+/* nord6: #ECEFF4 */
+/* Frost (Accents) */
+/* nord7: #8FBCBB */ /* Turquoise */
+/* nord8: #88C0D0 */ /* Lighter Blue */
+/* nord9: #81A1C1 */ /* Blue */
+/* nord10: #5E81AC */ /* Darker Blue */
+/* Aurora (Other Accents) */
+/* nord11: #BF616A */ /* Red */
+/* nord12: #D08770 */ /* Orange */
+/* nord13: #EBCB8B */ /* Yellow */
+/* nord14: #A3BE8C */ /* Green */
+/* nord15: #B48EAD */ /* Purple */
+
+QWidget {
+    background-color: #2E3440; /* nord0 */
+    color: #D8DEE9; /* nord4 */
+    border: none;
+    font-family: "DejaVu Sans Mono", "Consolas", "Monaco", monospace; /* Example font */
+}
+
+QMainWindow, QDialog {
+    background-color: #2E3440; /* nord0 */
+}
+
+QTextEdit, QLineEdit, QPlainTextEdit {
+    background-color: #3B4252; /* nord1 */
+    color: #ECEFF4; /* nord6 */
+    border: 1px solid #4C566A; /* nord3 */
+    selection-background-color: #5E81AC; /* nord10 */
+    selection-color: #ECEFF4; /* nord6 */
+    padding: 2px;
+}
+
+QTreeView {
+    background-color: #3B4252; /* nord1 */
+    color: #D8DEE9; /* nord4 */
+    border: 1px solid #4C566A; /* nord3 */
+    alternate-background-color: #434C5E; /* nord2 */
+}
+
+QTreeView::item {
+    padding: 3px;
+}
+
+QTreeView::item:selected {
+    background-color: #5E81AC; /* nord10 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QTreeView::item:hover {
+    background-color: #4C566A; /* nord3 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QPushButton {
+    background-color: #4C566A; /* nord3 */
+    color: #ECEFF4; /* nord6 */
+    border: 1px solid #5E697B; /* Slightly lighter than nord3 */
+    padding: 5px 10px;
+    min-width: 60px;
+    border-radius: 3px;
+}
+
+QPushButton:hover {
+    background-color: #5E697B;
+    border: 1px solid #6A778C;
+}
+
+QPushButton:pressed {
+    background-color: #434C5E; /* nord2 */
+}
+
+QPushButton:disabled {
+    background-color: #434C5E; /* nord2 */
+    color: #8892A4; /* Desaturated nord4 */
+}
+
+QMenuBar {
+    background-color: #3B4252; /* nord1 */
+    color: #D8DEE9; /* nord4 */
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    padding: 4px 8px;
+}
+
+QMenuBar::item:selected { /* hover */
+    background-color: #4C566A; /* nord3 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QMenuBar::item:pressed {
+    background-color: #5E81AC; /* nord10 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QMenu {
+    background-color: #3B4252; /* nord1 */
+    color: #D8DEE9; /* nord4 */
+    border: 1px solid #4C566A; /* nord3 */
+    padding: 5px;
+}
+
+QMenu::item {
+    padding: 4px 20px 4px 20px;
+}
+
+QMenu::item:selected {
+    background-color: #5E81AC; /* nord10 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #4C566A; /* nord3 */
+    margin-left: 10px;
+    margin-right: 5px;
+}
+
+QSplitter::handle {
+    background-color: #434C5E; /* nord2 */
+    border: 0px solid #2E3440;
+    width: 3px;
+    margin: 1px 0;
+}
+
+QSplitter::handle:horizontal {
+    width: 3px;
+    height: 1px;
+}
+
+QSplitter::handle:vertical {
+    height: 3px;
+    width: 1px;
+}
+
+QSplitter::handle:hover {
+    background-color: #88C0D0; /* nord8 */
+}
+
+
+QTabWidget::pane {
+    border: 1px solid #4C566A; /* nord3 */
+    background-color: #3B4252; /* nord1 */
+}
+
+QTabBar::tab {
+    background-color: #434C5E; /* nord2 */
+    color: #D8DEE9; /* nord4 */
+    border: 1px solid #4C566A;
+    border-bottom: none;
+    padding: 5px 10px;
+    margin-right: 2px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}
+
+QTabBar::tab:selected {
+    background-color: #3B4252; /* nord1 (pane color) */
+    color: #ECEFF4; /* nord6 */
+    border: 1px solid #4C566A;
+    border-bottom: 1px solid #3B4252; /* Match pane bg */
+}
+
+QTabBar::tab:!selected:hover {
+    background-color: #4C566A; /* nord3 */
+    color: #ECEFF4; /* nord6 */
+}
+
+QTabBar::close-button {
+    subcontrol-position: right;
+    padding-left: 3px;
+}
+QTabBar::close-button:hover {
+    background-color: #BF616A; /* nord11 / red */
+}
+
+
+QStatusBar {
+    background-color: #3B4252; /* nord1 */
+    color: #A5ABB6; /* Mid-tone gray */
+}
+
+QScrollBar:vertical {
+    background: #2E3440; /* nord0 */
+    width: 10px;
+    margin: 0px 0px 0px 0px;
+    border: 1px solid #4C566A; /* nord3 */
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #4C566A; /* nord3 */
+    min-height: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #5E697B; /* Lighter nord3 */
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+    background: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background: #2E3440; /* nord0 */
+    height: 10px;
+    margin: 0px 0px 0px 0px;
+    border: 1px solid #4C566A; /* nord3 */
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #4C566A; /* nord3 */
+    min-width: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #5E697B; /* Lighter nord3 */
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+    background: none;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
+}
+
+QComboBox {
+    background-color: #4C566A; /* nord3 */
+    border: 1px solid #5E697B; /* Lighter than nord3 */
+    color: #ECEFF4; /* nord6 */
+    padding: 1px 18px 1px 3px;
+    min-width: 6em;
+    border-radius: 3px;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 15px;
+    border-left: 1px solid #5E697B;
+}
+QComboBox QAbstractItemView { /* Dropdown list */
+    background-color: #3B4252; /* nord1 */
+    border: 1px solid #4C566A; /* nord3 */
+    selection-background-color: #5E81AC; /* nord10 */
+    color: #D8DEE9; /* nord4 */
+    selection-color: #ECEFF4; /* nord6 */
+}

@@ -1,12 +1,11 @@
 # --- START OF FILE gemini_controller.py ---
 
-from PySide6.QtCore import QObject, Signal, Slot, QThread # Added Slot, QThread
+from PySide6.QtCore import QObject, Signal, Slot, QThread
 import os
-# import time
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 import typing
-
+from PySide6.QtCore import QObject, Signal, Slot, QThread, QSetting
 # Forward declaration hint for type hinting
 if typing.TYPE_CHECKING:
     from file_pane import FilePane
@@ -15,18 +14,19 @@ if typing.TYPE_CHECKING:
 # --- Worker Class ---
 class GeminiWorker(QObject):
     """Runs the Gemini API call in a separate thread."""
-    # Signals mirrored from controller for thread communication
     started = Signal(str, str)      # sender, context_type
     chunk_received = Signal(str)    # chunk_text
-    finished = Signal(str, str)     # sender, context_type
+    finished = Signal(str, str)     # sender, context_type (may be modified on success)
     error = Signal(str, str)        # error_message, context_type
 
-    def __init__(self, model_name: str, prompt: str, context_type: str, sender: str = "Gemini"):
+    # <<< MODIFIED: Added filename parameter >>>
+    def __init__(self, model_name: str, prompt: str, context_type: str, sender: str = "Gemini", filename: typing.Optional[str] = None):
         super().__init__()
         self.model_name = model_name
         self.prompt = prompt
         self.context_type = context_type
         self.sender = sender
+        self.filename = filename # Store filename if provided for create context
         self._is_cancelled = False # Basic cancellation flag
 
     @Slot()
@@ -45,19 +45,21 @@ class GeminiWorker(QObject):
             safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
             model_instance = genai.GenerativeModel(full_model_name, safety_settings=safety_settings)
 
-            print(f"[Worker {QThread.currentThread()}] Starting API call...")
+            print(f"[Worker {QThread.currentThread()}] Starting API call (Context: {self.context_type}, Filename: {self.filename})...")
             # --- Emit started signal *before* blocking call ---
             self.started.emit(self.sender, self.context_type)
 
             response = model_instance.generate_content(self.prompt, stream=True)
 
             print(f"[Worker {QThread.currentThread()}] --- Gemini Response Stream ({self.context_type}) ---")
+            stream_successful = True # Assume success initially
             for chunk in response:
                  if self._is_cancelled:
                       print(f"[Worker {QThread.currentThread()}] Stream cancelled by request.")
                       # Don't emit finished, maybe a specific cancelled signal or error?
                       self.error.emit("Stream cancelled", self.context_type)
-                      return
+                      stream_successful = False
+                      break # Exit loop
 
                  # Check for safety blocks
                  if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
@@ -67,7 +69,8 @@ class GeminiWorker(QObject):
                       error_msg = f"Error: Blocked by safety filters. Reason: {reason}. Category: {category}."
                       print(f"[Worker {QThread.currentThread()}] Stream blocked: {reason} ({category})")
                       self.error.emit(error_msg, self.context_type)
-                      return # Stop processing
+                      stream_successful = False
+                      break # Stop processing
 
                  if hasattr(chunk, 'text'):
                     # print(chunk.text, end="", flush=True) # DEBUG on Worker Thread Console
@@ -76,9 +79,16 @@ class GeminiWorker(QObject):
                     # print(f"[Worker {QThread.currentThreadId()}] [Stream Info Chunk - No Text]")
                     pass
 
-            # --- Finished successfully ---
-            print(f"\n[Worker {QThread.currentThread()}] --- End Gemini Stream ---")
-            self.finished.emit(self.sender, self.context_type)
+            # <<< MODIFIED: Emit specific context on successful file creation >>>
+            if stream_successful:
+                print(f"\n[Worker {QThread.currentThread()}] --- End Gemini Stream (Success) ---")
+                final_context_type = self.context_type
+                # If this was a file creation task and we have a filename, modify the context
+                if self.context_type == 'file_create' and self.filename:
+                    final_context_type = f"create_success:{self.filename}"
+                    print(f"[Worker {QThread.currentThread()}] Emitting success context: {final_context_type}")
+                self.finished.emit(self.sender, final_context_type)
+            # If stream_successful is False, the error signal was already emitted or cancellation handled
 
         # --- Error Handling within the Thread ---
         except google_exceptions.PermissionDenied as e: msg = f"API Permission Denied: {e}"; self.error.emit(msg, self.context_type); print(f"[Worker Error] {msg}")
@@ -98,8 +108,7 @@ class GeminiWorker(QObject):
             self.error.emit(error_msg, self.context_type)
             print(error_msg) # Also print for debugging
         finally:
-            # Important: Ensure finished signal is emitted if run completes without error
-            # This is handled above now. If an error occurs, error signal is emitted.
+            # Finish/Error signals are emitted within the try/except blocks or cancellation logic
             pass
 
     def cancel(self):
@@ -115,20 +124,38 @@ class GeminiController(QObject):
     edit_context_set_from_chat = Signal(str)
     stream_started = Signal(str, str)
     stream_chunk_received = Signal(str)
-    stream_finished = Signal(str, str)
+    stream_finished = Signal(str, str) # Will now potentially emit "create_success:<filename>"
     stream_error = Signal(str, str)
+
+class GeminiController(QObject):
+    # ... (signals remain the same) ...
 
     def __init__(self, file_pane_ref: 'FilePane', editor_pane_ref: 'EditorPane'):
         super().__init__()
         self.file_pane = file_pane_ref
         self.editor_pane = editor_pane_ref
         self.current_context = {}
-        self.selected_model_name = "gemini-1.5-flash-latest"
+
+        # <<<--- QSettings Initialization --- >>>
+        # Use appropriate organization and application names
+        # These determine where the settings are stored on the user's system
+        self.settings = QSettings("GemNetOrg", "GemNet") # CHANGE "GemNetOrg" if desired
+
+        # <<<--- Load Saved Model or Use Default --- >>>
+        # Provide a sensible default model name if nothing is saved yet
+        default_model = "gemini-1.5-flash-latest"
+        # Load the value associated with the key "gemini/selected_model"
+        saved_model = self.settings.value("gemini/selected_model", defaultValue=default_model)
+        self.selected_model_name = saved_model
+        print(f"[Controller Init] Loaded selected model: {self.selected_model_name}") # Debug
+
         self.available_models = []
-        self.model_instance = None # Keep for non-streaming potentially, but worker handles streaming model
+        self.model_instance = None
         self._is_configured = False
-        self._active_thread = None # Keep track of the running thread
-        self._active_worker = None # Keep track of the running worker
+        self._active_thread = None
+        self._active_worker = None
+
+        # Now configure Gemini. update_available_models will use the loaded model name.
         self._configure_gemini()
 
     def _configure_gemini(self):
@@ -199,17 +226,25 @@ class GeminiController(QObject):
             self.available_models = []; self.available_models_updated.emit([])
 
     # No longer loads instance, just sets name
+    # No longer loads instance, just sets name and saves preference
     def set_selected_model(self, model_short_name, initial_load=False):
-        """Sets the *name* of the active Gemini model."""
+        """Sets the *name* of the active Gemini model and saves the preference."""
         if not self._is_configured and not initial_load:
              self.status_update.emit("Error", "Gemini API not configured. Cannot set model."); return
         # Check if the requested model is actually in our fetched list (optional but good practice)
         if self.available_models and model_short_name not in self.available_models and not initial_load:
              self.status_update.emit("Warning", f"Model '{model_short_name}' not in known list. Selection may fail if invalid.")
 
-        self.selected_model_name = model_short_name
-        self.status_update.emit("GemNet", f"Selected model set to: {model_short_name}")
-        # No need to load the model instance here anymore for streaming
+        if self.selected_model_name != model_short_name or initial_load: # Check if changed or initial load
+            self.selected_model_name = model_short_name
+            self.status_update.emit("GemNet", f"Selected model set to: {model_short_name}")
+
+            # <<<--- Save the new selection --- >>>
+            if not initial_load: # Don't save during initial load sequence if called then
+                print(f"[Controller] Saving selected model preference: {model_short_name}")
+                self.settings.setValue("gemini/selected_model", model_short_name)
+                # QSettings usually writes changes immediately or upon destruction,
+                # but you can force it with self.settings.sync() if needed (rarely).
 
 
     def _read_files(self, file_paths):
@@ -238,10 +273,11 @@ class GeminiController(QObject):
             except Exception as e: self.status_update.emit("Error", f"Could not access {path}: {e}")
         return contents
 
-    # <<< REPLACED _call_gemini_api with _stream_gemini_api >>>
-    def _stream_gemini_api(self, prompt: str, context_type: str, sender: str = "Gemini"):
+    # <<< MODIFIED: Added filename_for_create parameter >>>
+    def _stream_gemini_api(self, prompt: str, context_type: str, sender: str = "Gemini", filename_for_create: typing.Optional[str] = None):
         """
         Starts the Gemini API streaming call in a separate thread.
+        Passes filename to worker if context is 'file_create'.
         """
         if not self._is_configured:
              self.stream_error.emit("Error: Gemini API not configured.", context_type)
@@ -260,17 +296,24 @@ class GeminiController(QObject):
             # self._active_thread.wait(1000) # Wait briefly for clean exit
 
         self.status_update.emit(sender, f"Sending request to {self.selected_model_name}...")
-        print(f"\n--- Gemini Prompt ({self.selected_model_name}) ---\n{prompt[:500]}...\n--- End Prompt ---")
+        print(f"\n--- Gemini Prompt ({self.selected_model_name}) Context: {context_type} Filename: {filename_for_create} ---\n{prompt[:500]}...\n--- End Prompt ---")
 
         # --- Setup Worker and Thread ---
         self._active_thread = QThread()
-        self._active_worker = GeminiWorker(self.selected_model_name, prompt, context_type, sender)
+        # <<< MODIFIED: Pass filename to worker >>>
+        self._active_worker = GeminiWorker(
+            self.selected_model_name,
+            prompt,
+            context_type,
+            sender,
+            filename=filename_for_create # Pass filename here
+        )
         self._active_worker.moveToThread(self._active_thread)
 
         # --- Connect Worker Signals to Controller Slots (to run on main thread) ---
         self._active_worker.started.connect(self.on_stream_started)
         self._active_worker.chunk_received.connect(self.on_stream_chunk_received)
-        self._active_worker.finished.connect(self.on_stream_finished)
+        self._active_worker.finished.connect(self.on_stream_finished) # Will receive modified context
         self._active_worker.error.connect(self.on_stream_error)
 
         # --- Connect Thread Signals ---
@@ -294,17 +337,22 @@ class GeminiController(QObject):
         # print(f"[Controller MainThread] Worker sent chunk: {chunk[:30]}...") # DEBUG
         self.stream_chunk_received.emit(chunk) # Re-emit for UI
 
+    # <<< MODIFIED: Receives potentially modified context_type >>>
     @Slot(str, str)
     def on_stream_finished(self, sender, context_type):
+        # context_type might now be "create_success:filename.txt"
         print(f"[Controller MainThread] Worker reported stream finished ({sender}/{context_type})")
         self.status_update.emit(sender, "Received full response.")
-        self.stream_finished.emit(sender, context_type) # Re-emit for UI
+        # Re-emit exactly what the worker sent (could be original or modified)
+        self.stream_finished.emit(sender, context_type)
+        # Context clearing is now primarily handled by MainWindow after processing the finish/error signal
 
     @Slot(str, str)
     def on_stream_error(self, error_message, context_type):
         print(f"[Controller MainThread] Worker reported error ({context_type}): {error_message}")
         self.status_update.emit("Error", f"Stream Error: {error_message}")
         self.stream_error.emit(error_message, context_type) # Re-emit for UI
+        # Context clearing is now primarily handled by MainWindow after processing the finish/error signal
 
     @Slot()
     def _cleanup_thread(self):
@@ -343,7 +391,7 @@ class GeminiController(QObject):
         prompt += "Provide the explanation below:"
 
         self._stream_gemini_api(prompt, context_type='chat', sender="Gemini")
-        self.current_context = {}
+        self.current_context = {} # Clear context immediately for simple requests like explain
 
 
     def request_edit(self, file_paths, instructions):
@@ -362,6 +410,7 @@ class GeminiController(QObject):
              return
 
         prompt = self._build_edit_prompt(target_filename, target_content, instructions, contents)
+        # Context was already set before this was called (in MainWindow or process_user_chat)
         self._stream_gemini_api(prompt, context_type='editor', sender="Gemini")
 
     def _build_edit_prompt(self, target_filename, target_content, instructions, context_files=None):
@@ -389,7 +438,7 @@ class GeminiController(QObject):
 
     def process_user_chat(self, message):
         # (Keep implementation as it was, it calls relevant request methods or _stream_gemini_api)
-        print(f"[Controller DEBUG] Processing chat message: '{message[:100]}...'")
+        print(f"[Controller DEBUG] Processing chat message: '{message[:100]}...' Context: {self.current_context}")
         action = self.current_context.get('action')
 
         if action == 'edit':
@@ -397,11 +446,11 @@ class GeminiController(QObject):
             if files:
                  print("[Controller DEBUG] Handling message as edit instruction (context: file).")
                  self.request_edit(files, message)
-                 self.current_context = {}
+                 # Context is NOT cleared here, MainWindow handles it on stream finish/error
                  return
             else: # Error case
                  self.stream_error.emit("Internal Error: Edit context lost file information.", 'editor')
-                 self.current_context = {}
+                 self.set_context({}) # Clear broken context
                  return
         elif action == 'edit_editor':
             print("[Controller DEBUG] Handling message as edit instruction (context: editor).")
@@ -411,10 +460,12 @@ class GeminiController(QObject):
                  filename_hint = os.path.basename(editor_path) if editor_path and editor_path != 'current tab' else 'current tab'
                  prompt = self._build_edit_prompt(filename_hint, editor_content, message)
                  self._stream_gemini_api(prompt, context_type='editor', sender="Gemini")
-            else: self.stream_error.emit("Cannot edit: No active editor tab found or content is inaccessible.", 'editor')
-            self.current_context = {}
+                 # Context is NOT cleared here, MainWindow handles it on stream finish/error
+            else:
+                 self.stream_error.emit("Cannot edit: No active editor tab found or content is inaccessible.", 'editor')
+                 self.set_context({}) # Clear broken context
             return
-        elif action == 'create':
+        elif action == 'create': # User entered description AFTER /create command
             print("[Controller DEBUG] Handling message as create description.")
             filename = self.current_context.get('filename')
             description = message
@@ -424,12 +475,22 @@ class GeminiController(QObject):
                 content_prompt += f"Description: '{description}'\n\n"
                 content_prompt += "Generate ONLY the raw file content based on the description.\n"
                 content_prompt += "IMPORTANT: Do NOT include the filename, explanations, introductions, apologies, ```markdown formatting```, or any text other than the required file content itself."
-                self.current_context['action'] = 'creating_file' # Update state
-                self._stream_gemini_api(content_prompt, context_type='file_create', sender="Gemini")
-                # Context cleared by MainWindow on create_success finish signal
+
+                # <<< MODIFIED: Update state *before* calling API >>>
+                self.current_context['action'] = 'creating_file' # Update state to indicate API call is in progress
+                print(f"[Controller DEBUG] Updated context action to 'creating_file' for {filename}")
+
+                # <<< MODIFIED: Pass filename to _stream_gemini_api >>>
+                self._stream_gemini_api(
+                    content_prompt,
+                    context_type='file_create', # Use base context type here
+                    sender="Gemini",
+                    filename_for_create=filename # Pass the filename
+                )
+                # Context is NOT cleared here, MainWindow handles it on stream finish/error
             else: # Error case
                  self.stream_error.emit("Internal Error: Create context lost filename information.", 'chat')
-                 self.current_context = {}
+                 self.current_context = {} # Clear broken context
             return
 
         # --- Command parsing ---
@@ -441,37 +502,58 @@ class GeminiController(QObject):
         if command == "/create":
              filename_raw = args_str
              if filename_raw:
+                 # Basic sanitization, improve if needed
                  safe_filename = "".join(c for c in filename_raw if c.isalnum() or c in ('.', '_', '-', ' ')).strip()
-                 if not safe_filename or safe_filename in [".", "_", "-"]: safe_filename = f"gemini_generated_{safe_filename}.txt" if safe_filename else "gemini_generated_file.txt"
+                 if not safe_filename or safe_filename in [".", "_", "-"] or safe_filename.startswith('.') or safe_filename.endswith('.'):
+                     safe_filename = f"gemini_generated_{safe_filename}.txt" if safe_filename else "gemini_generated_file.txt"
+
+                 # Set context for the *next* message (the description)
                  self.set_context({'action': 'create', 'filename': safe_filename})
                  prompt_msg = f"Creating '{safe_filename}'. Provide description/content prompt in next message."
                  self.edit_context_set_from_chat.emit(prompt_msg)
                  self.status_update.emit("GemNet", f"Ready for description for {safe_filename}...")
-             else: self.stream_error.emit("Usage: /create <filename>\n(Provide description in the next message)", 'chat')
-             return
+             else:
+                 # Show error in chat, don't change context
+                 self.stream_error.emit("Usage: /create <filename>\n(Provide description in the next message)", 'chat')
+             return # Wait for next message
+
         elif command == "/explain":
             filename = args_str
             if filename:
                  full_path = os.path.join(current_dir, filename)
                  if os.path.isfile(full_path):
                      self.status_update.emit("GemNet", f"Requesting explanation for {filename}...")
+                     # Clear any previous action context before starting explain
+                     self.set_context({})
                      self.request_explanation([full_path])
-                 else: self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
-            else: self.stream_error.emit("Usage: /explain <filename>", 'chat')
+                 else:
+                     self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
+                     self.set_context({}) # Clear context on error
+            else:
+                self.stream_error.emit("Usage: /explain <filename>", 'chat')
+                self.set_context({}) # Clear context on error
             return
+
         elif command == "/edit":
              filename = args_str
              if filename:
                  full_path = os.path.join(current_dir, filename)
                  if os.path.isfile(full_path):
+                     # Request MainWindow to open file FIRST
                      self.edit_file_requested_from_chat.emit(full_path)
+                     # Set context for the *next* message (the instruction)
                      self.set_context({'action': 'edit', 'files': [full_path]})
                      prompt_msg = f"Editing '{filename}'. Provide instructions in next message."
                      self.edit_context_set_from_chat.emit(prompt_msg)
                      self.status_update.emit("GemNet", f"Ready for edit instructions for {filename}...")
-                 else: self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
-             else: self.stream_error.emit("Usage: /edit <filename>", 'chat')
-             return
+                 else:
+                     self.stream_error.emit(f"Error: File '{filename}' not found in '{os.path.basename(current_dir)}'.", 'chat')
+                     self.set_context({}) # Clear context on error
+             else:
+                 self.stream_error.emit("Usage: /edit <filename>", 'chat')
+                 self.set_context({}) # Clear context on error
+             return # Wait for next message
+
         elif command == "/explain_editor":
             editor_content = self.editor_pane.get_current_content()
             editor_path = self.editor_pane.get_current_path()
@@ -485,33 +567,41 @@ class GeminiController(QObject):
                  prompt += truncated_content + ("\n[... content truncated ...]\n" if len(editor_content) > 15000 else "")
                  prompt += "\n---\n"
                  prompt += "Provide the explanation below:"
+                 # Clear previous context before starting explain
+                 self.set_context({})
                  self._stream_gemini_api(prompt, context_type='chat', sender="Gemini")
-            else: self.stream_error.emit("Error: No active editor tab found to explain.", 'chat')
+            else:
+                self.stream_error.emit("Error: No active editor tab found to explain.", 'chat')
+                self.set_context({}) # Clear context on error
             return
+
         elif command == "/edit_editor":
              current_widget = self.editor_pane.tab_widget.currentWidget()
              if current_widget:
                  editor_path_prop = current_widget.property("file_path")
                  filename_hint = os.path.basename(editor_path_prop) if editor_path_prop else "current tab"
+                 # Set context for the *next* message (the instruction)
                  self.set_context({'action': 'edit_editor', 'path': editor_path_prop if editor_path_prop else 'current tab'})
                  prompt_msg = f"Editing content of '{filename_hint}'. Provide instructions in next message."
                  self.edit_context_set_from_chat.emit(prompt_msg)
                  self.status_update.emit("GemNet", f"Ready for edit instructions for {filename_hint}...")
-             else: self.stream_error.emit("Error: No active editor tab found to edit.", 'chat')
-             return
+             else:
+                 self.stream_error.emit("Error: No active editor tab found to edit.", 'chat')
+                 self.set_context({}) # Clear context on error
+             return # Wait for next message
         else: # Standard Chat
             print("[Controller DEBUG] Handling as standard chat message.")
             prompt = "You are a helpful assistant called GemNet. Respond concisely and helpfully.\n"
             prompt += f"\nUser: {message}\n\nAssistant:"
+            # Clear any previous action context before starting standard chat
+            self.set_context({})
             self._stream_gemini_api(prompt, context_type='chat', sender="Gemini")
 
 
     def set_context(self, context):
-        """Allows setting context (like files selected for editing)."""
-        print(f"[Controller DEBUG] Setting context: {context}")
+        """Allows setting context (like files selected for editing/creation)."""
+        # Log the context change for debugging state issues
+        print(f"[Controller CONTEXT] Setting context: {context}")
         self.current_context = context
-
-    # Removed finalize_generated_file - this logic is now implicitly handled
-    # by MainWindow receiving the stream_finished signal with 'create_success:<filename>'
 
 # --- END OF FILE gemini_controller.py ---
